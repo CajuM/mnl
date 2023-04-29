@@ -1,2 +1,3 @@
 master: [376000] running\_loss=0.019801878702593968; closs=0.023282647132873535; audible=0.00992882251739502; success=0.998828113079071;
-decoder-l2: [348000] running\_loss=0.016149132965307216; closs=0.0048100934363901615; audible=0.010111868381500244; success=0.9995703101158142;
+decoder-l2: [2596000] running\_loss=0.013381955973192817; closs=0.009219411760568619; audible=0.009885132312774658; success=0.9990234375;
+with just one linear layer in the decoder, it failes to converge, two linear layers with a RelU in-between seems to work best
