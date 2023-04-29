@@ -101,8 +101,6 @@ class Decoder(torch.nn.Module):
         self.seq = torch.nn.Sequential(
             torch.nn.Linear(SAMPLES_PER_SYMBOL, SAMPLES_PER_SYMBOL),
             torch.nn.ReLU(),
-            torch.nn.Linear(SAMPLES_PER_SYMBOL, SAMPLES_PER_SYMBOL),
-            torch.nn.ReLU(),
             torch.nn.Linear(SAMPLES_PER_SYMBOL, N_SYMBOLS),
         )
 
