@@ -73,15 +73,6 @@ class Channel(torch.nn.Module):
         self.noise = torchaudio.functional.resample(noise, sample_rate, SAMPLE_RATE).to(device)
 
     def forward(self, x):
-        rand_idx = torch.randint(self.noise.size(0) - SAMPLES_PER_SYMBOL, (x.shape[0],), device=device)
-        rand_idx = torch.arange(SAMPLES_PER_SYMBOL, device=device).repeat(x.shape[0]) + rand_idx.expand(SAMPLES_PER_SYMBOL, -1).T.flatten()
-        noise = self.noise[rand_idx].reshape(x.shape)
-        snr =  MIN_SNR + (MAX_SNR - MIN_SNR) * torch.rand(x.shape[0], device=device)
-        x = torchaudio.functional.add_noise(x, noise, snr)
-
-        gain_db = MIN_GAIN + (MAX_GAIN - MIN_GAIN) * torch.rand((x.shape[0], 1), device=device)
-        x = x * (10 ** (gain_db / 20))
-
         x = torchaudio.functional.resample(x, SAMPLE_RATE, SAMPLE_RATE * SAMPLE_SHIFT)
         x_len = x.shape[-1]
         pad1 = torch.rand((x.shape[0], HALF_SHIFT), device=device)
@@ -90,6 +81,15 @@ class Channel(torch.nn.Module):
         shift = torch.randint(0, SAMPLE_SHIFT, (1,)).item()
         x = x[:, shift: shift + x_len]
         x = torchaudio.functional.resample(x, SAMPLE_RATE * SAMPLE_SHIFT, SAMPLE_RATE)
+
+        rand_idx = torch.randint(self.noise.size(0) - SAMPLES_PER_SYMBOL, (x.shape[0],), device=device)
+        rand_idx = torch.arange(SAMPLES_PER_SYMBOL, device=device).repeat(x.shape[0]) + rand_idx.expand(SAMPLES_PER_SYMBOL, -1).T.flatten()
+        noise = self.noise[rand_idx].reshape(x.shape)
+        snr =  MIN_SNR + (MAX_SNR - MIN_SNR) * torch.rand(x.shape[0], device=device)
+        x = torchaudio.functional.add_noise(x, noise, snr)
+
+        gain_db = MIN_GAIN + (MAX_GAIN - MIN_GAIN) * torch.rand((x.shape[0], 1), device=device)
+        x = x * (10 ** (gain_db / 20))
 
         return x
         
