@@ -1,3 +1,3 @@
 #!/bin/sh
 
-ffmpeg -f pulse -i default -ar 48000 -ac 1 -f wav -c:a pcm_s16le $1
+ffmpeg -f pulse -ar 48000 -ac 1 -i default -f wav -ar 48000 -ac 1 -c:a pcm_s16le $1

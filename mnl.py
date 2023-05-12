@@ -25,7 +25,6 @@ MAX_SNR = 60.
 MIN_GAIN = -20.
 MAX_GAIN = 0.
 TRAIN_BATCHES = 1
-TRAIN_ROUNDS = 2000
 EVAL_BATCHES = 100
 MAX_AUDIBILITY = .01
 MAX_CLOSS = .005
@@ -144,12 +143,15 @@ def evaluate(model, dataloader):
     inputs, labels = next(dataloader)
 
     model.train(False)
-    symbols, _ = model.encoder(torch.arange(N_SYMBOLS, device=device))
     outputs, loss, audible = model(inputs)
     success =  (outputs == labels).float().mean()
     model.train(True)
 
-    return symbols.cpu().detach().numpy(), loss, success.item(), audible.item()
+    return loss.item(), success.item(), audible.item()
+
+def get_symbols(model):
+    symbols, _ = model.encoder(torch.arange(N_SYMBOLS, device=device))
+    return symbols
 
 def main():
     model = get_model()
@@ -161,7 +163,8 @@ def main():
     optimizer = torch.optim.Adam(model.parameters())
 
     running_loss = 0.
-    last_closs = 1.
+    last_success = .2 ** (1 / 64)
+    last_time = time.time()
     for i, data in enumerate(trainloader, 0):
         inputs, labels = data
 
@@ -181,14 +184,16 @@ def main():
         optimizer.step()
         
         running_loss += loss.item()
-        if i % TRAIN_ROUNDS == (TRAIN_ROUNDS - 1):
+        if (time.time() - last_time) > 10.:
+            last_time = time.time()
+
             with torch.no_grad():
-                _, closs, success, audible = evaluate(model, evalloader)
+                closs, success, audible = evaluate(model, evalloader)
             print(f'[{i + 1}] running_loss={running_loss / 2000}; closs={closs}; audible={audible}; success={success};')
             running_loss = 0.
 
-            if closs < last_closs and audible < (MAX_AUDIBILITY * 1.1):
-                last_closs = closs
+            if success > last_success and audible < (MAX_AUDIBILITY * 1.1):
+                last_success = success
                 torch.save(model.state_dict(), f'models/model-{i + 1}.pt')
 
             if (audible < (MAX_AUDIBILITY * 1.1)) and (success == 1.):

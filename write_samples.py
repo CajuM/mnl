@@ -18,9 +18,7 @@ model = mnl.get_model().to(device)
 model_f = sys.argv[1]
 
 model.load_state_dict(torch.load(model_f))
-symbols, loss, ev, audible = mnl.evaluate(model, mnl.get_dataloader(100))
+symbols = mnl.get_symbols(model).cpu()
 
-print(model_f, loss, ev, audible)
-
-torchaudio.save('test/0.wav', torch.tensor(symbols[0].reshape((1, -1))), mnl.SAMPLE_RATE, encoding='PCM_S', bits_per_sample=16)
-torchaudio.save('test/m.wav', torch.tensor(symbols.flatten().reshape(1, -1)), mnl.SAMPLE_RATE, encoding='PCM_S', bits_per_sample=16)
+torchaudio.save('test/0.wav', symbols[0].reshape((1, -1)), mnl.SAMPLE_RATE, encoding='PCM_S', bits_per_sample=16)
+torchaudio.save('test/m.wav', symbols.flatten().reshape(1, -1), mnl.SAMPLE_RATE, encoding='PCM_S', bits_per_sample=16)
