@@ -199,10 +199,8 @@ def main():
                 last_success = success
                 torch.save(model.state_dict(), f'models/model-{i + 1}.pt')
 
-            if (audible < (MAX_AUDIBILITY * 1.1)) and (success == 1.):
-                print('Success!')
-                torch.save(model.state_dict(), f'smodels/smodel-{int(time.time())}.pt')
-                break
+        if i > 1000000:
+            break
 
 
     print('Finished Training')
