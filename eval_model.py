@@ -13,5 +13,5 @@ model_f = sys.argv[1]
 
 model.load_state_dict(torch.load(model_f))
 
-loss, ev, audible = mnl.evaluate(model, mnl.get_dataloader(mnl.EVAL_BATCHES))
-print(model_f, loss, ev, audible)
+loss, success, audible = mnl.evaluate(model, mnl.get_dataloader(mnl.EVAL_BATCHES))
+print(model_f, loss, success, audible)

@@ -15,6 +15,7 @@ SAMPLE_SHIFT = 2 * HALF_SHIFT
 SAMPLE_RATE = 48000
 HIGHPASS_HZ = 19000.
 LOWPASS_HZ = 20000.
+AUDIBLE_HZ = 1000.
 #TODO: How few?
 SAMPLES_PER_SYMBOL = 350
 N_FFT = 1999
@@ -24,9 +25,10 @@ MIN_SNR = -50.
 MAX_SNR = 60.
 MIN_GAIN = -60.
 MAX_GAIN = 0.
-TRAIN_BATCHES = 1
+TRAIN_BATCHES = 100
 EVAL_BATCHES = 1000
-MAX_AUDIBILITY = .01
+MAX_AUDIBILITY = .001
+EVAL_ROUNDS = 100
 
 device = torch.device('cuda')
 
@@ -78,19 +80,20 @@ class Channel(torch.nn.Module):
         return x
         
 #TODO: Take into consideration reducing the number of decoder weights/datatype for integration into ICs
-#TODO: Get rid of softmax in ICs
 class Decoder(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.seq = torch.nn.Sequential(
             torch.nn.Linear(SAMPLES_PER_SYMBOL, SAMPLES_PER_SYMBOL),
             torch.nn.ReLU(),
+            torch.nn.Linear(SAMPLES_PER_SYMBOL, SAMPLES_PER_SYMBOL),
+            torch.nn.ReLU(),
+            torch.nn.Linear(SAMPLES_PER_SYMBOL, SAMPLES_PER_SYMBOL),
+            torch.nn.ReLU(),
             torch.nn.Linear(SAMPLES_PER_SYMBOL, N_SYMBOLS),
         )
 
     def forward(self, x):
-        x = torchaudio.functional.highpass_biquad(x, SAMPLE_RATE, HIGHPASS_HZ)
-        x = torchaudio.functional.lowpass_biquad(x, SAMPLE_RATE, LOWPASS_HZ)
         x = self.seq(x)
         return x
 
@@ -101,21 +104,25 @@ class Model(torch.nn.Module):
         self.channel = Channel()
         self.decoder = Decoder()
         self.loss = torch.nn.CrossEntropyLoss()
-        self.spectrogram = torchaudio.transforms.Spectrogram(n_fft=N_FFT, power=1)
+        self.spectrogram = torchaudio.transforms.Spectrogram(n_fft=N_FFT, power=1).to(device)
 
-    def _audible(self, symbols):
+        max_energy_signal = 2. * torch.sin(torch.arange(SAMPLES_PER_SYMBOL, device=device) * AUDIBLE_HZ * 2. * torch.pi / SAMPLE_RATE)
+        max_energy_symbols = max_energy_signal.repeat(N_SYMBOLS, 1)
+        self.max_audible_energy = self._energy(max_energy_symbols).item()
+
+    def _energy(self, symbols):
         x = torch.arange(N_SYMBOLS, device=device)
         x = torch.cartesian_prod(x, x)
-        x_rand = torch.randint(x.shape[0], (max(N_SYMBOLS * 2, int((N_FFT + 1) / 2)),))
+        x_rand = torch.randint(x.shape[0], (max(N_SYMBOLS * N_SYMBOLS, int((N_FFT + 1) / 2)),))
         x = x[x_rand,:].flatten()
         x = symbols[x, :].flatten()
         spectrogram = self.spectrogram(x)
         highpass = int(spectrogram.shape[-2] * HIGHPASS_HZ / SAMPLE_RATE * 2)
         lowpass = int(spectrogram.shape[-2] * LOWPASS_HZ / SAMPLE_RATE * 2)
-        band_energy = spectrogram[highpass:lowpass,].sum(-2).mean()
-        energy = spectrogram.sum(-2).mean()
-        audible = 1. - (band_energy / energy)
-        return audible
+        low_energy = spectrogram[:highpass,].sum()
+        high_energy = spectrogram[lowpass:,].sum()
+        energy = low_energy + high_energy
+        return energy
 
     def forward(self, labels):
         x = self.encoder(labels)
@@ -128,7 +135,7 @@ class Model(torch.nn.Module):
         outputs = x.argmax(-1)
 
         symbols = get_symbols(self)
-        audible = self._audible(symbols)
+        audible = self._energy(symbols) / self.max_audible_energy
 
         return outputs, loss, audible
 
@@ -146,11 +153,16 @@ def evaluate(model, dataloader):
     inputs, labels = next(dataloader)
 
     model.train(False)
-    outputs, loss, audible = model(inputs)
-    success = (outputs == labels).float().mean()
+    avg_success = 0
+    for _ in range(EVAL_ROUNDS):
+        outputs, loss, audible = model(inputs)
+        success = (outputs == labels).float().mean()
+        avg_success += success
+
+    avg_success /= EVAL_ROUNDS
     model.train(True)
 
-    return loss.item(), success.item(), audible.item()
+    return loss.item(), avg_success.item(), audible.item()
 
 def get_symbols(model):
     symbols = model.encoder(torch.arange(N_SYMBOLS, device=device))
@@ -168,18 +180,11 @@ def main():
     running_loss = 0.
     last_success = .9
     last_time = time.time()
+    idx = 1
     for i, data in enumerate(trainloader, 0):
         inputs, labels = data
 
         outputs, closs, audible = model(inputs)
-#        r_audible = (audible - MAX_AUDIBILITY).relu()
-#        n_audible = MAX_AUDIBILITY
-#        r_success = ((0.5 - success) * 0.1 / (0.5 - 0.1). - 0.1).relu() * (0.5 * 0.1 / (0.5 - 0.1) - 0.1)
-#        r_closs = (closs - 0.001).relu()
-#        n_closs = 0.001
-#        loss = r_closs + n_closs * audible
-#        loss = r_audible + n_audible * closs
-
         loss = audible if audible >= MAX_AUDIBILITY else closs
 
         optimizer.zero_grad()
@@ -192,12 +197,16 @@ def main():
 
             with torch.no_grad():
                 closs, success, audible = evaluate(model, evalloader)
-            print(f'[{i + 1}] running_loss={running_loss / 2000}; closs={closs}; audible={audible}; success={success};')
+
+            print(f'[{i + 1}] running_loss={running_loss / idx}; closs={closs}; audible={audible}; success={success};')
             running_loss = 0.
+            idx = 1
 
             if success > last_success and audible < (MAX_AUDIBILITY * 1.1):
                 last_success = success
                 torch.save(model.state_dict(), f'models/model-{i + 1}.pt')
+
+        idx += 1
 
         if i > 1000000:
             break

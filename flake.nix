@@ -19,6 +19,12 @@
             gcc.cc.lib
             zlib
           ];
+          runScript = pkgs.writeShellScript "init.sh" ''
+	    [ -n "$MNL_IN_DEVSHELL" ] && exit
+	    export MNL_IN_DEVSHELL=1
+	    source venv/bin/activate
+	    $SHELL -l
+	  '';
         }).env;
       }));
 }
