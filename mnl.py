@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import math
+import os
 import sys
 import time
 
@@ -10,25 +11,40 @@ import torchaudio
 #TODO: Test on hardware
 #TODO: Change the datatype to something supported by most microphones
 
-HALF_SHIFT = 10
-SAMPLE_SHIFT = 2 * HALF_SHIFT
-SAMPLE_RATE = 48000
-HIGHPASS_HZ = 19000.
-LOWPASS_HZ = 20000.
-AUDIBLE_HZ = 1000.
-#TODO: How few?
-SAMPLES_PER_SYMBOL = 350
-N_FFT = 1999
-N_SYMBOLS = 2
-NOISE = 'data/noise.wav'
-MIN_SNR = -50.
-MAX_SNR = 60.
-MIN_GAIN = -60.
-MAX_GAIN = 0.
-TRAIN_BATCHES = 100
-EVAL_BATCHES = 1000
-MAX_AUDIBILITY = .001
-EVAL_ROUNDS = 100
+ARGS = {
+    'SAMPLE_SHIFT': (int, 20),
+    'SAMPLE_RATE': (int, 48000),
+    'HIGHPASS_HZ': (float, 19000.),
+    'LOWPASS_HZ': (float, 20000.),
+    'AUDIBLE_HZ': (float, 1000.),
+    'SAMPLES_PER_SYMBOL': (int, 200),
+    'N_FFT': (int, 1999),
+    'N_SYMBOLS': (int, 2),
+    'NOISE': (str, 'data/noise.wav'),
+    'MIN_SNR': (float, -50.),
+    'MAX_SNR': (float, 60.),
+    'MIN_GAIN': (float, -60.),
+    'MAX_GAIN': (float, 0.),
+    'MAX_AUDIBILITY': (float, 0.001),
+    'TRAIN_BATCHES': (int, 100),
+    'EVAL_BATCHES': (int, 1000),
+    'EVAL_ROUNDS': (int, 100),
+    'USE_BANDPASS': (int, 0),
+    'EPOCHS': (int, 1000000),
+    'CHANNEL_NOISE': (int, 1),
+    'CHANNEL_ATTENUATION': (int, 1),
+    'CHANNEL_SAMPLE_SHIFT': (int, 1),
+}
+
+for k, v in ARGS.items():
+    if k in os.environ:
+        v = ARGS[k][0](os.environ[k])
+
+    else:
+        v = ARGS[k][0](ARGS[k][1])
+
+    globals()[k] = v
+    print(f'{k}={v}')
 
 device = torch.device('cuda')
 
@@ -54,10 +70,11 @@ class Channel(torch.nn.Module):
         noise = noise.mean(0)
         self.noise = torchaudio.functional.resample(noise, sample_rate, SAMPLE_RATE).to(device)
 
-    def forward(self, x):
+    def _sample_shift(self, x):
         x = torchaudio.functional.resample(x, SAMPLE_RATE, SAMPLE_RATE * SAMPLE_SHIFT)
-        pad1 = torch.rand((x.shape[0], HALF_SHIFT), device=device)
-        pad2 = torch.rand((x.shape[0], HALF_SHIFT), device=device)
+        half_shift = int(SAMPLE_SHIFT / 2)
+        pad1 = torch.rand((x.shape[0], half_shift), device=device)
+        pad2 = torch.rand((x.shape[0], half_shift), device=device)
         x = torch.cat((pad1, x, pad2), -1)
         shift = torch.randint(SAMPLE_SHIFT, (x.shape[0],), device=device)
         shift = shift.expand(SAMPLES_PER_SYMBOL * SAMPLE_SHIFT, -1).T.flatten()
@@ -66,16 +83,33 @@ class Channel(torch.nn.Module):
         shift = base + inc + shift
         x = x.flatten()[shift].reshape((x.shape[0], SAMPLES_PER_SYMBOL * SAMPLE_SHIFT))
         x = torchaudio.functional.resample(x, SAMPLE_RATE * SAMPLE_SHIFT, SAMPLE_RATE)
+        return x
 
+    def _attenuation(self, x):
+        x = self._sample_shift(x)
         gain_db = MIN_GAIN + (MAX_GAIN - MIN_GAIN) * torch.rand((x.shape[0], 1), device=device)
-        x = x * (10 ** (gain_db / 20))
+        x = x * (10. ** (gain_db / 20.))
+        return x
 
+    def _noise(self, x):
         rand_idx = torch.randint(self.noise.size(0) - SAMPLES_PER_SYMBOL, (x.shape[0],), device=device)
         rand_idx = rand_idx.expand(SAMPLES_PER_SYMBOL, -1).T.flatten()
         rand_idx = torch.arange(SAMPLES_PER_SYMBOL, device=device).repeat(x.shape[0]) + rand_idx
         noise = self.noise[rand_idx].reshape(x.shape)
-        snr =  MIN_SNR + (MAX_SNR - MIN_SNR) * torch.rand(x.shape[0], device=device)
-        x = torchaudio.functional.add_noise(x, noise, snr)
+        snr =  MIN_SNR + (MAX_SNR - MIN_SNR) * torch.rand((x.shape[0], 1), device=device)
+        snr = 10. ** (snr / 20.)
+        x = x * (snr / (1. + snr)) + noise * (1. / (1. + snr))
+        return x
+
+    def forward(self, x):
+        if CHANNEL_SAMPLE_SHIFT:
+            x = self._sample_shift(x)
+
+        if CHANNEL_ATTENUATION:
+            x = self._attenuation(x)
+
+        if CHANNEL_NOISE:
+            x = self._noise(x)
 
         return x
         
@@ -94,6 +128,10 @@ class Decoder(torch.nn.Module):
         )
 
     def forward(self, x):
+        if USE_BANDPASS:
+            x = torchaudio.functional.highpass_biquad(x, SAMPLE_RATE, HIGHPASS_HZ)
+            x = torchaudio.functional.lowpass_biquad(x, SAMPLE_RATE, LOWPASS_HZ)
+
         x = self.seq(x)
         return x
 
@@ -104,6 +142,7 @@ class Model(torch.nn.Module):
         self.channel = Channel()
         self.decoder = Decoder()
         self.loss = torch.nn.CrossEntropyLoss()
+
         self.spectrogram = torchaudio.transforms.Spectrogram(n_fft=N_FFT, power=1).to(device)
 
         max_energy_signal = 2. * torch.sin(torch.arange(SAMPLES_PER_SYMBOL, device=device) * AUDIBLE_HZ * 2. * torch.pi / SAMPLE_RATE)
@@ -178,14 +217,14 @@ def main():
     optimizer = torch.optim.Adam(model.parameters())
 
     running_loss = 0.
-    last_success = .9
+    last_loss = 1e9
     last_time = time.time()
     idx = 1
     for i, data in enumerate(trainloader, 0):
         inputs, labels = data
 
-        outputs, closs, audible = model(inputs)
-        loss = audible if audible >= MAX_AUDIBILITY else closs
+        outputs, loss, audible = model(inputs)
+        loss = audible if audible >= MAX_AUDIBILITY else loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -196,19 +235,19 @@ def main():
             last_time = time.time()
 
             with torch.no_grad():
-                closs, success, audible = evaluate(model, evalloader)
+                loss, success, audible = evaluate(model, evalloader)
 
-            print(f'[{i + 1}] running_loss={running_loss / idx}; closs={closs}; audible={audible}; success={success};')
+            print(f'[{i + 1}] running_loss={running_loss / idx}; loss={loss}; audible={audible}; success={success};')
             running_loss = 0.
             idx = 1
 
-            if success > last_success and audible < (MAX_AUDIBILITY * 1.1):
-                last_success = success
+            if loss < last_loss and audible < (MAX_AUDIBILITY * 1.1):
+                last_loss = loss
                 torch.save(model.state_dict(), f'models/model-{i + 1}.pt')
 
         idx += 1
 
-        if i > 1000000:
+        if i > EPOCHS:
             break
 
 
