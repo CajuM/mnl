@@ -34,6 +34,8 @@ ARGS = {
     'CHANNEL_NOISE': (int, 1),
     'CHANNEL_ATTENUATION': (int, 1),
     'CHANNEL_SAMPLE_SHIFT': (int, 1),
+    'N_DATA': (int, 4),
+    'N_PARITY': (int, 3),
 }
 
 for k, v in ARGS.items():
@@ -49,14 +51,31 @@ for k, v in ARGS.items():
 device = torch.device('cuda')
 
 #TODO: Filter audible signals
+class OneHot(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        x = torch.nn.functional.one_hot(x, num_classes=N_SYMBOLS)
+        x = x.float()
+        return x
+
 class Encoder(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.linear = torch.nn.Linear(N_SYMBOLS, SAMPLES_PER_SYMBOL)
 
     def forward(self, x):
-        x = torch.nn.functional.one_hot(x, num_classes=N_SYMBOLS)
-        x = x.float()
+        x = self.linear(x)
+        x = x.sigmoid() * 2. - 1.
+        return x
+
+class Parity(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(N_DATA * N_SYMBOLS, N_PARITY * SAMPLES_PER_SYMBOL)
+
+    def forward(self, x):
         x = self.linear(x)
         x = x.sigmoid() * 2. - 1.
         return x
@@ -71,30 +90,31 @@ class Channel(torch.nn.Module):
         self.noise = torchaudio.functional.resample(noise, sample_rate, SAMPLE_RATE).to(device)
 
     def _sample_shift(self, x):
+        x_len = x.shape[-1]
         x = torchaudio.functional.resample(x, SAMPLE_RATE, SAMPLE_RATE * SAMPLE_SHIFT)
         half_shift = int(SAMPLE_SHIFT / 2)
         pad1 = torch.rand((x.shape[0], half_shift), device=device)
         pad2 = torch.rand((x.shape[0], half_shift), device=device)
         x = torch.cat((pad1, x, pad2), -1)
         shift = torch.randint(SAMPLE_SHIFT, (x.shape[0],), device=device)
-        shift = shift.expand(SAMPLES_PER_SYMBOL * SAMPLE_SHIFT, -1).T.flatten()
-        base = SAMPLE_SHIFT * (SAMPLES_PER_SYMBOL + 1) * torch.arange(x.shape[0], device=device).expand(SAMPLES_PER_SYMBOL * SAMPLE_SHIFT, -1).T.flatten()
-        inc =  torch.arange(SAMPLES_PER_SYMBOL * SAMPLE_SHIFT, device=device).repeat(x.shape[0])
+        shift = shift.expand(x_len * SAMPLE_SHIFT, -1).T.flatten()
+        base = SAMPLE_SHIFT * (x_len + 1) * torch.arange(x.shape[0], device=device).expand(x_len * SAMPLE_SHIFT, -1).T.flatten()
+        inc =  torch.arange(x_len * SAMPLE_SHIFT, device=device).repeat(x.shape[0])
         shift = base + inc + shift
-        x = x.flatten()[shift].reshape((x.shape[0], SAMPLES_PER_SYMBOL * SAMPLE_SHIFT))
+        x = x.flatten()[shift].reshape((x.shape[0], x_len * SAMPLE_SHIFT))
         x = torchaudio.functional.resample(x, SAMPLE_RATE * SAMPLE_SHIFT, SAMPLE_RATE)
         return x
 
     def _attenuation(self, x):
-        x = self._sample_shift(x)
         gain_db = MIN_GAIN + (MAX_GAIN - MIN_GAIN) * torch.rand((x.shape[0], 1), device=device)
         x = x * (10. ** (gain_db / 20.))
         return x
 
     def _noise(self, x):
-        rand_idx = torch.randint(self.noise.size(0) - SAMPLES_PER_SYMBOL, (x.shape[0],), device=device)
-        rand_idx = rand_idx.expand(SAMPLES_PER_SYMBOL, -1).T.flatten()
-        rand_idx = torch.arange(SAMPLES_PER_SYMBOL, device=device).repeat(x.shape[0]) + rand_idx
+        x_len = x.shape[-1]
+        rand_idx = torch.randint(self.noise.size(0) - x_len, (x.shape[0],), device=device)
+        rand_idx = rand_idx.expand(x_len, -1).T.flatten()
+        rand_idx = torch.arange(x_len, device=device).repeat(x.shape[0]) + rand_idx
         noise = self.noise[rand_idx].reshape(x.shape)
         snr =  MIN_SNR + (MAX_SNR - MIN_SNR) * torch.rand((x.shape[0], 1), device=device)
         snr = 10. ** (snr / 20.)
@@ -118,13 +138,13 @@ class Decoder(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.seq = torch.nn.Sequential(
-            torch.nn.Linear(SAMPLES_PER_SYMBOL, SAMPLES_PER_SYMBOL),
+            torch.nn.Linear(SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY), SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY)),
             torch.nn.ReLU(),
-            torch.nn.Linear(SAMPLES_PER_SYMBOL, SAMPLES_PER_SYMBOL),
+            torch.nn.Linear(SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY), SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY)),
             torch.nn.ReLU(),
-            torch.nn.Linear(SAMPLES_PER_SYMBOL, SAMPLES_PER_SYMBOL),
+            torch.nn.Linear(SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY), SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY)),
             torch.nn.ReLU(),
-            torch.nn.Linear(SAMPLES_PER_SYMBOL, N_SYMBOLS),
+            torch.nn.Linear(SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY), N_SYMBOLS * N_DATA),
         )
 
     def forward(self, x):
@@ -138,7 +158,9 @@ class Decoder(torch.nn.Module):
 class Model(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        self.onehot = OneHot()
         self.encoder = Encoder()
+        self.parity = Parity()
         self.channel = Channel()
         self.decoder = Decoder()
         self.loss = torch.nn.CrossEntropyLoss()
@@ -164,26 +186,38 @@ class Model(torch.nn.Module):
         return energy
 
     def forward(self, labels):
+        labels = labels.reshape(-1)
+        labels = self.onehot(labels)
+        p = self.parity(labels.reshape((-1, N_SYMBOLS * N_DATA)))
         x = self.encoder(labels)
+        x = x.reshape((-1, N_DATA * SAMPLES_PER_SYMBOL))
+        x = torch.cat([x, p], -1)
+        x = x.reshape((-1, SAMPLES_PER_SYMBOL))
         x = self.channel(x)
+        x = x.reshape((-1, (N_DATA + N_PARITY) * SAMPLES_PER_SYMBOL))
         x = self.decoder(x)
+        x = x.reshape((-1, N_SYMBOLS))
 
-        labels_oh = torch.nn.functional.one_hot(labels, num_classes=N_SYMBOLS).float()
-        loss = self.loss(x, labels_oh)
+        loss = self.loss(x, labels)
 
         outputs = x.argmax(-1)
+        outputs = outputs.reshape((-1, N_DATA))
 
-        symbols = get_symbols(self)
+        symbols = self.get_symbols()
         audible = self._energy(symbols) / self.max_audible_energy
 
         return outputs, loss, audible
+
+    def get_symbols(self):
+        symbols = self.onehot(torch.arange(N_SYMBOLS, device=device))
+        symbols = self.encoder(symbols)
+        return symbols
 
 def get_model():
     return Model()
 
 def get_dataloader(batches):
-    data = torch.arange(N_SYMBOLS, device=device)
-    data = data.repeat(batches)
+    data = torch.randint(N_SYMBOLS, (N_SYMBOLS * batches, N_DATA), device=device)
 
     while True:
         yield (data.clone(), data.clone())
@@ -202,10 +236,6 @@ def evaluate(model, dataloader):
     model.train(True)
 
     return loss.item(), avg_success.item(), audible.item()
-
-def get_symbols(model):
-    symbols = model.encoder(torch.arange(N_SYMBOLS, device=device))
-    return symbols
 
 def main():
     model = get_model()

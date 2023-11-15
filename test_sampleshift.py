@@ -18,7 +18,7 @@ model = mnl.get_model().to(device)
 model_f = sys.argv[1]
 
 model.load_state_dict(torch.load(model_f))
-symbols = mnl.get_symbols(model)
+symbols = model.get_symbols()
 
 symbols2 = torchaudio.functional.resample(symbols, mnl.SAMPLE_RATE, mnl.SAMPLE_RATE * mnl.SAMPLE_SHIFT)
 for idx in range(mnl.SAMPLE_SHIFT):
