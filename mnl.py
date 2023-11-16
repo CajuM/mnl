@@ -244,7 +244,7 @@ def main():
 
     trainloader = get_dataloader(TRAIN_BATCHES)
     evalloader = get_dataloader(EVAL_BATCHES)
-    optimizer = torch.optim.Adam(model.parameters())
+    optimizer = torch.optim.AdamW(model.parameters())
 
     running_loss = 0.
     last_loss = 1e9
