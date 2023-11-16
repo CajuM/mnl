@@ -267,13 +267,16 @@ def main():
             with torch.no_grad():
                 loss, success, audible = evaluate(model, evalloader)
 
-            print(f'[{i + 1}] running_loss={running_loss / idx}; loss={loss}; audible={audible}; success={success};')
-            running_loss = 0.
-            idx = 1
-
             if loss < last_loss and audible < (MAX_AUDIBILITY * 1.1):
                 last_loss = loss
                 torch.save(model.state_dict(), f'models/model-{i + 1}.pt')
+                print(f'[SAVED {i + 1}] running_loss={running_loss / idx}; loss={loss}; audible={audible}; success={success};')
+
+            else:
+                print(f'[{i + 1}] running_loss={running_loss / idx}; loss={loss}; audible={audible}; success={success};')
+
+            running_loss = 0.
+            idx = 1
 
         idx += 1
 
