@@ -14,10 +14,12 @@
         devShell = (pkgs.buildFHSUserEnv {
           name = "mnl";
           targetPkgs = ps: with ps; [
-            python311Full
-            ffmpeg.lib
-            gcc.cc.lib
-            zlib
+	    (python312.withPackages (ps': with ps'; [
+              ipython
+              matplotlib
+              torch
+              torchaudio
+	    ]))
           ];
         }).env;
       }));
