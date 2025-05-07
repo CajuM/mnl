@@ -14,10 +14,9 @@ import torchaudio
 ARGS = {
     'SAMPLE_SHIFT': (int, 20),
     'SAMPLE_RATE': (int, 48000),
-    'HIGHPASS_HZ': (float, 19000.),
-    'LOWPASS_HZ': (float, 20000.),
+    'FREQUENCY': (int, 20000),
     'AUDIBLE_HZ': (float, 1000.),
-    'SAMPLES_PER_SYMBOL': (int, 200),
+    'SAMPLES_PER_SYMBOL': (int, 24),
     'N_FFT': (int, 1999),
     'N_SYMBOLS': (int, 2),
     'NOISE': (str, 'data/noise.wav'),
@@ -148,10 +147,6 @@ class Decoder(torch.nn.Module):
         )
 
     def forward(self, x):
-        if USE_BANDPASS:
-            x = torchaudio.functional.highpass_biquad(x, SAMPLE_RATE, HIGHPASS_HZ)
-            x = torchaudio.functional.lowpass_biquad(x, SAMPLE_RATE, LOWPASS_HZ)
-
         x = self.seq(x)
         return x
 
@@ -178,10 +173,9 @@ class Model(torch.nn.Module):
         x = x[x_rand,:].flatten()
         x = symbols[x, :].flatten()
         spectrogram = self.spectrogram(x)
-        highpass = int(spectrogram.shape[-2] * HIGHPASS_HZ / SAMPLE_RATE * 2)
-        lowpass = int(spectrogram.shape[-2] * LOWPASS_HZ / SAMPLE_RATE * 2)
-        low_energy = spectrogram[:highpass,].sum()
-        high_energy = spectrogram[lowpass:,].sum()
+        bandpass = int(spectrogram.shape[-2] * FREQUENCY / SAMPLE_RATE * 2)
+        low_energy = spectrogram[:bandpass,].sum()
+        high_energy = spectrogram[bandpass + 1:,].sum()
         energy = low_energy + high_energy
         return energy
 
