@@ -9,32 +9,30 @@ import torch
 import torchaudio
 
 #TODO: Test on hardware
-#TODO: Change the datatype to something supported by most microphones
 
 ARGS = {
     'SAMPLE_SHIFT': (int, 20),
     'SAMPLE_RATE': (int, 48000),
     'FREQUENCY': (int, 20000),
     'AUDIBLE_HZ': (float, 1000.),
-    'SAMPLES_PER_SYMBOL': (int, 24),
-    'N_FFT': (int, 1999),
+    'SAMPLES_PER_SYMBOL': (int, 2400),
     'N_SYMBOLS': (int, 2),
+    'N_FFT': (int, 1999),
     'NOISE': (str, 'data/noise.wav'),
     'MIN_SNR': (float, -50.),
     'MAX_SNR': (float, 60.),
     'MIN_GAIN': (float, -60.),
     'MAX_GAIN': (float, 0.),
-    'MAX_AUDIBILITY': (float, 0.001),
-    'TRAIN_BATCHES': (int, 100),
-    'EVAL_BATCHES': (int, 1000),
+    'MAX_AUDIBILITY': (float, 71),
     'EVAL_ROUNDS': (int, 100),
-    'USE_BANDPASS': (int, 0),
     'EPOCHS': (int, 1000000),
-    'CHANNEL_NOISE': (int, 1),
-    'CHANNEL_ATTENUATION': (int, 1),
-    'CHANNEL_SAMPLE_SHIFT': (int, 1),
-    'N_DATA': (int, 4),
-    'N_PARITY': (int, 3),
+    'CHANNEL_NOISE': (bool, True),
+    'CHANNEL_ATTENUATION': (bool, True),
+    'CHANNEL_SAMPLE_SHIFT': (bool, True),
+    'SIGNAL_AUDIBILITY': (bool, True),
+    'H_LEN1': (int, 100),
+    'H_LEN2': (int, 100),
+    'H_LEN3': (int, 100),
 }
 
 for k, v in ARGS.items():
@@ -49,7 +47,6 @@ for k, v in ARGS.items():
 
 device = torch.device('cuda')
 
-#TODO: Filter audible signals
 class OneHot(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -72,7 +69,7 @@ class Encoder(torch.nn.Module):
 class Parity(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.linear = torch.nn.Linear(N_DATA * N_SYMBOLS, N_PARITY * SAMPLES_PER_SYMBOL)
+        self.linear = torch.nn.Linear(N_SYMBOLS, SAMPLES_PER_SYMBOL)
 
     def forward(self, x):
         x = self.linear(x)
@@ -91,7 +88,7 @@ class Channel(torch.nn.Module):
     def _sample_shift(self, x):
         x_len = x.shape[-1]
         x = torchaudio.functional.resample(x, SAMPLE_RATE, SAMPLE_RATE * SAMPLE_SHIFT)
-        half_shift = int(SAMPLE_SHIFT / 2)
+        half_shift = SAMPLE_SHIFT // 2
         pad1 = torch.rand((x.shape[0], half_shift), device=device)
         pad2 = torch.rand((x.shape[0], half_shift), device=device)
         x = torch.cat((pad1, x, pad2), -1)
@@ -134,16 +131,16 @@ class Channel(torch.nn.Module):
         
 #TODO: Take into consideration reducing the number of decoder weights/datatype for integration into ICs
 class Decoder(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, h_len1, h_len2, h_len3):
         super().__init__()
         self.seq = torch.nn.Sequential(
-            torch.nn.Linear(SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY), SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY)),
+            torch.nn.Linear(SAMPLES_PER_SYMBOL, h_len1),
             torch.nn.ReLU(),
-            torch.nn.Linear(SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY), SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY)),
+            torch.nn.Linear(h_len1, h_len2),
             torch.nn.ReLU(),
-            torch.nn.Linear(SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY), SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY)),
+            torch.nn.Linear(h_len2, h_len3),
             torch.nn.ReLU(),
-            torch.nn.Linear(SAMPLES_PER_SYMBOL * (N_DATA + N_PARITY), N_SYMBOLS * N_DATA),
+            torch.nn.Linear(h_len3, N_SYMBOLS),
         )
 
     def forward(self, x):
@@ -155,89 +152,87 @@ class Model(torch.nn.Module):
         super().__init__()
         self.onehot = OneHot()
         self.encoder = Encoder()
-        self.parity = Parity()
         self.channel = Channel()
-        self.decoder = Decoder()
+        self.decoder = Decoder(H_LEN1, H_LEN2, H_LEN3)
         self.loss = torch.nn.CrossEntropyLoss()
-
         self.spectrogram = torchaudio.transforms.Spectrogram(n_fft=N_FFT, power=1).to(device)
 
-        max_energy_signal = 2. * torch.sin(torch.arange(SAMPLES_PER_SYMBOL, device=device) * AUDIBLE_HZ * 2. * torch.pi / SAMPLE_RATE)
-        max_energy_symbols = max_energy_signal.repeat(N_SYMBOLS, 1)
-        self.max_audible_energy = self._energy(max_energy_symbols).item()
-
-    def _energy(self, symbols):
-        x = torch.arange(N_SYMBOLS, device=device)
-        x = torch.cartesian_prod(x, x)
-        x_rand = torch.randint(x.shape[0], (max(N_SYMBOLS * N_SYMBOLS, int((N_FFT + 1) / 2)),))
-        x = x[x_rand,:].flatten()
-        x = symbols[x, :].flatten()
-        spectrogram = self.spectrogram(x)
-        bandpass = int(spectrogram.shape[-2] * FREQUENCY / SAMPLE_RATE * 2)
+    def _bandblock_audibility(self, samples):
+        samples = samples.repeat(1, N_FFT // samples.shape[0] + 1)
+        spectrogram = self.spectrogram(samples)
+        bandpass = (spectrogram.shape[-2] * FREQUENCY * 2) // SAMPLE_RATE
         low_energy = spectrogram[:bandpass,].sum()
         high_energy = spectrogram[bandpass + 1:,].sum()
         energy = low_energy + high_energy
         return energy
 
     def forward(self, labels):
-        labels = labels.reshape(-1)
-        labels = self.onehot(labels)
-        p = self.parity(labels.reshape((-1, N_SYMBOLS * N_DATA)))
-        x = self.encoder(labels)
-        x = x.reshape((-1, N_DATA * SAMPLES_PER_SYMBOL))
-        x = torch.cat([x, p], -1)
-        x = x.reshape((-1, SAMPLES_PER_SYMBOL))
+        y = self.onehot(labels)
+
+        x = self.encoder(y)
         x = self.channel(x)
-        x = x.reshape((-1, (N_DATA + N_PARITY) * SAMPLES_PER_SYMBOL))
         x = self.decoder(x)
-        x = x.reshape((-1, N_SYMBOLS))
 
-        loss = self.loss(x, labels)
-
+        loss = self.loss(x, y)
         outputs = x.argmax(-1)
-        outputs = outputs.reshape((-1, N_DATA))
 
-        symbols = self.get_symbols()
-        audible = self._energy(symbols) / self.max_audible_energy
+        if SIGNAL_AUDIBILITY:
+            symbols = self.get_symbols()
+            audibility = self._bandblock_audibility(symbols)
 
-        return outputs, loss, audible
+        else:
+            audibility = torch.tensor(0.)
+
+        return outputs, loss, audibility
 
     def get_symbols(self):
-        symbols = self.onehot(torch.arange(N_SYMBOLS, device=device))
+        a = torch.arange(N_SYMBOLS, device=device)
+        b = torch.arange(N_SYMBOLS, device=device)
+
+        symbols = self.onehot(torch.cartesian_prod(a, b).flatten())
         symbols = self.encoder(symbols)
+        symbols = symbols.flatten()
+
         return symbols
 
 def get_model():
     return Model()
 
 def get_dataloader(batches):
-    data = torch.randint(N_SYMBOLS, (N_SYMBOLS * batches, N_DATA), device=device)
-
     while True:
-        yield (data.clone(), data.clone())
+        data = torch.randint(N_SYMBOLS, (batches,), device=device)
+        yield data
 
 def evaluate(model, dataloader):
-    inputs, labels = next(dataloader)
+    labels = next(dataloader)
 
     model.train(False)
-    avg_success = 0
+
+    avg_success = 0.
+    avg_audibility = 0.
+
     for _ in range(EVAL_ROUNDS):
-        outputs, loss, audible = model(inputs)
+        outputs, loss, audibility = model(labels)
+
         success = (outputs == labels).float().mean()
         avg_success += success
 
+        avg_audibility += audibility
+
     avg_success /= EVAL_ROUNDS
+    avg_audibility /= EVAL_ROUNDS
+
     model.train(True)
 
-    return loss.item(), avg_success.item(), audible.item()
+    return loss.item(), avg_success.item(), avg_audibility.item()
 
 def main():
     model = get_model()
     model = model.to(device)
     model.train(True)
 
-    trainloader = get_dataloader(TRAIN_BATCHES)
-    evalloader = get_dataloader(EVAL_BATCHES)
+    trainloader = get_dataloader(16)
+    evalloader = get_dataloader(128)
     optimizer = torch.optim.AdamW(model.parameters())
 
     running_loss = 0.
@@ -245,10 +240,10 @@ def main():
     last_time = time.time()
     idx = 1
     for i, data in enumerate(trainloader, 0):
-        inputs, labels = data
+        labels = data
 
-        outputs, loss, audible = model(inputs)
-        loss = audible if audible >= MAX_AUDIBILITY else loss
+        _, loss, audiblity = model(labels)
+        loss = audiblity if SIGNAL_AUDIBILITY and (audiblity >= MAX_AUDIBILITY) else loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -259,15 +254,17 @@ def main():
             last_time = time.time()
 
             with torch.no_grad():
-                loss, success, audible = evaluate(model, evalloader)
+                loss, success, audibility = evaluate(model, evalloader)
 
-            if loss < last_loss and audible < (MAX_AUDIBILITY * 1.1):
+            rep = f'running_loss={running_loss / idx}; loss={loss}; audibility={audibility}; success={success};'
+
+            if (loss < last_loss) and (audibility <= MAX_AUDIBILITY):
                 last_loss = loss
                 torch.save(model.state_dict(), f'models/model-{i + 1}.pt')
-                print(f'[SAVED {i + 1}] running_loss={running_loss / idx}; loss={loss}; audible={audible}; success={success};')
+                print(f'[SAVED {i + 1}] {rep}')
 
             else:
-                print(f'[{i + 1}] running_loss={running_loss / idx}; loss={loss}; audible={audible}; success={success};')
+                print(f'[{i + 1}] {rep}')
 
             running_loss = 0.
             idx = 1
@@ -276,7 +273,6 @@ def main():
 
         if i > EPOCHS:
             break
-
 
     print('Finished Training')
 
