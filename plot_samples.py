@@ -12,14 +12,21 @@ from matplotlib import pyplot as plt
 
 matplotlib.use('TkAgg')
 
-signal_f = sys.argv[1]
+def main(signal_f):
+    signal, sample_rate = torchaudio.load(signal_f)
+    signal = signal.mean(0)
 
-signal, sample_rate = torchaudio.load(signal_f)
-signal = signal.mean(0)
-signal = torchaudio.functional.resample(signal, sample_rate, mnl.SAMPLE_RATE)
+    plt.plot(signal.cpu())
+    plt.show()
 
-plt.plot(signal.cpu())
-plt.show()
+    spectorgram = torchaudio.transforms.Spectrogram(n_fft=mnl.N_FFT, power=1).cpu()
 
-plt.plot(torch.arange(1000) / 1000 * mnl.SAMPLE_RATE / 2, torchaudio.transforms.Spectrogram(n_fft=1999, power=1)(signal.repeat(1000)).mean(dim=-1).cpu())
-plt.show()
+    y = spectorgram(signal.repeat(1000)).cpu().mean(-1)
+    x = torch.arange(y.shape[0]) / y.shape[0] * mnl.SAMPLE_RATE
+
+    plt.plot(x, y)
+    plt.show()
+
+if __name__ == '__main__':
+    main(sys.argv[1])
+

@@ -5,6 +5,7 @@ import os
 import sys
 import time
 
+import optuna
 import torch
 import torchaudio
 
@@ -14,26 +15,23 @@ ARGS = {
     'SAMPLE_SHIFT': (int, 20),
     'SAMPLE_RATE': (int, 48000),
     'FREQUENCY': (int, 20000),
-    'AUDIBLE_HZ': (float, 1000.),
-    'SAMPLES_PER_SYMBOL': (int, 2400),
-    'N_SYMBOLS': (int, 2),
     'N_FFT': (int, 1999),
     'NOISE': (str, 'data/noise.wav'),
-    'MIN_SNR': (float, -50.),
-    'MAX_SNR': (float, 60.),
-    'MIN_GAIN': (float, -60.),
-    'MAX_GAIN': (float, 0.),
-    'MAX_AUDIBILITY': (float, 71),
-    'EVAL_ROUNDS': (int, 100),
-    'EPOCHS': (int, 1000000),
+    'MIN_SNR': (float, 15.),
+    'MAX_SNR': (float, 40.),
+    'MIN_GAIN': (float, -20.),
+    'MAX_GAIN': (float, 20.),
+    'MAX_AUDIBILITY': (float, 0.01),
+    'HYP_STEPS': (int, 10240),
+    'TRAIN_BATCH': (int, 16),
+    'FRAME_SIZE': (int, 64),
     'CHANNEL_NOISE': (bool, True),
-    'CHANNEL_ATTENUATION': (bool, True),
+    'CHANNEL_ATTENUATION': (bool, False),
     'CHANNEL_SAMPLE_SHIFT': (bool, True),
     'SIGNAL_AUDIBILITY': (bool, True),
-    'H_LEN1': (int, 100),
-    'H_LEN2': (int, 100),
-    'H_LEN3': (int, 100),
 }
+
+DEC_LAYERS_LENS = [100, 100, 100]
 
 for k, v in ARGS.items():
     if k in os.environ:
@@ -45,38 +43,29 @@ for k, v in ARGS.items():
     globals()[k] = v
     print(f'{k}={v}')
 
-device = torch.device('cuda')
+device = torch.device('cpu')
+torch.set_num_threads(14)
 
 class OneHot(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, n_symbols):
         super().__init__()
+        self.n_symbols = n_symbols
 
     def forward(self, x):
-        x = torch.nn.functional.one_hot(x, num_classes=N_SYMBOLS)
+        x = torch.nn.functional.one_hot(x, num_classes=self.n_symbols)
         x = x.float()
         return x
 
 class Encoder(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, n_symbols, samples_per_symbol):
         super().__init__()
-        self.linear = torch.nn.Linear(N_SYMBOLS, SAMPLES_PER_SYMBOL)
+        self.linear = torch.nn.Linear(n_symbols, samples_per_symbol)
 
     def forward(self, x):
         x = self.linear(x)
         x = x.sigmoid() * 2. - 1.
         return x
 
-class Parity(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.linear = torch.nn.Linear(N_SYMBOLS, SAMPLES_PER_SYMBOL)
-
-    def forward(self, x):
-        x = self.linear(x)
-        x = x.sigmoid() * 2. - 1.
-        return x
-
-#TODO: Scale model "score" to noise and attenuation
 #TODO: Noise and attenuation distribution
 class Channel(torch.nn.Module):
     def __init__(self):
@@ -114,7 +103,7 @@ class Channel(torch.nn.Module):
         noise = self.noise[rand_idx].reshape(x.shape)
         snr =  MIN_SNR + (MAX_SNR - MIN_SNR) * torch.rand((x.shape[0], 1), device=device)
         snr = 10. ** (snr / 20.)
-        x = x * (snr / (1. + snr)) + noise * (1. / (1. + snr))
+        x = (x * snr + noise) / (1. + snr)
         return x
 
     def forward(self, x):
@@ -131,29 +120,40 @@ class Channel(torch.nn.Module):
         
 #TODO: Take into consideration reducing the number of decoder weights/datatype for integration into ICs
 class Decoder(torch.nn.Module):
-    def __init__(self, h_len1, h_len2, h_len3):
+    def __init__(self, n_symbols, samples_per_symbol, dec_layers_lens):
         super().__init__()
-        self.seq = torch.nn.Sequential(
-            torch.nn.Linear(SAMPLES_PER_SYMBOL, h_len1),
-            torch.nn.ReLU(),
-            torch.nn.Linear(h_len1, h_len2),
-            torch.nn.ReLU(),
-            torch.nn.Linear(h_len2, h_len3),
-            torch.nn.ReLU(),
-            torch.nn.Linear(h_len3, N_SYMBOLS),
-        )
+
+        dec_layers_lens.append(n_symbols)
+
+        if len(dec_layers_lens) < 1:
+            raise Exception(f'need more than one layer, provided={len(dec_layers_lens)}')
+
+        seq = [torch.nn.Linear(samples_per_symbol, dec_layers_lens[0])]
+
+        for layer in range(1, len(dec_layers_lens)):
+            seq += [torch.nn.ReLU()]
+            seq += [torch.nn.Linear(dec_layers_lens[layer - 1], dec_layers_lens[layer])]
+
+        self.seq = torch.nn.Sequential(*seq)
 
     def forward(self, x):
         x = self.seq(x)
+        x = x.softmax(-1)
+
         return x
 
 class Model(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, n_symbols, samples_per_symbol, dec_layers_lens):
         super().__init__()
-        self.onehot = OneHot()
-        self.encoder = Encoder()
+
+        self.n_symbols = n_symbols
+        self.samples_per_symbol = samples_per_symbol
+        self.n_bits = int(math.log2(n_symbols))
+
+        self.onehot = OneHot(n_symbols)
+        self.encoder = Encoder(n_symbols, samples_per_symbol)
         self.channel = Channel()
-        self.decoder = Decoder(H_LEN1, H_LEN2, H_LEN3)
+        self.decoder = Decoder(n_symbols, samples_per_symbol, dec_layers_lens)
         self.loss = torch.nn.CrossEntropyLoss()
         self.spectrogram = torchaudio.transforms.Spectrogram(n_fft=N_FFT, power=1).to(device)
 
@@ -161,10 +161,10 @@ class Model(torch.nn.Module):
         samples = samples.repeat(1, N_FFT // samples.shape[0] + 1)
         spectrogram = self.spectrogram(samples)
         bandpass = (spectrogram.shape[-2] * FREQUENCY * 2) // SAMPLE_RATE
-        low_energy = spectrogram[:bandpass,].sum()
-        high_energy = spectrogram[bandpass + 1:,].sum()
-        energy = low_energy + high_energy
-        return energy
+        low_energy = spectrogram[:bandpass,]
+        #high_energy = spectrogram[bandpass + 1:,].sum()
+        energy = low_energy #+ high_energy
+        return energy.mean()
 
     def forward(self, labels):
         y = self.onehot(labels)
@@ -177,7 +177,7 @@ class Model(torch.nn.Module):
         outputs = x.argmax(-1)
 
         if SIGNAL_AUDIBILITY:
-            symbols = self.get_symbols()
+            symbols = self.get_audibility_sample()
             audibility = self._bandblock_audibility(symbols)
 
         else:
@@ -185,9 +185,34 @@ class Model(torch.nn.Module):
 
         return outputs, loss, audibility
 
+    def evaluate(self):
+        labels = torch.arange(self.n_symbols, device=device).repeat(TRAIN_BATCH)
+
+        outputs, loss, audibility = self(labels)
+        success = (outputs == labels).float().mean()
+
+        frame_p = success.item() ** (FRAME_SIZE * 8 / self.n_bits)
+        frame_v = (SAMPLE_RATE / self.samples_per_symbol * self.n_bits / 8 / FRAME_SIZE)
+
+        frame_v = frame_v * frame_p
+
+        if SIGNAL_AUDIBILITY and (audibility >= MAX_AUDIBILITY):
+            return loss, frame_v, audibility, -audibility.item()
+
+        else:
+            return loss, frame_v, audibility, frame_v
+
     def get_symbols(self):
-        a = torch.arange(N_SYMBOLS, device=device)
-        b = torch.arange(N_SYMBOLS, device=device)
+        symbols = torch.arange(self.n_symbols, device=device)
+
+        symbols = self.onehot(symbols)
+        symbols = self.encoder(symbols)
+
+        return symbols
+
+    def get_audibility_sample(self):
+        a = torch.arange(self.n_symbols, device=device)
+        b = torch.arange(self.n_symbols, device=device)
 
         symbols = self.onehot(torch.cartesian_prod(a, b).flatten())
         symbols = self.encoder(symbols)
@@ -195,86 +220,18 @@ class Model(torch.nn.Module):
 
         return symbols
 
-def get_model():
-    return Model()
-
-def get_dataloader(batches):
-    while True:
-        data = torch.randint(N_SYMBOLS, (batches,), device=device)
-        yield data
-
-def evaluate(model, dataloader):
-    labels = next(dataloader)
-
-    model.train(False)
-
-    avg_success = 0.
-    avg_audibility = 0.
-
-    for _ in range(EVAL_ROUNDS):
-        outputs, loss, audibility = model(labels)
-
-        success = (outputs == labels).float().mean()
-        avg_success += success
-
-        avg_audibility += audibility
-
-    avg_success /= EVAL_ROUNDS
-    avg_audibility /= EVAL_ROUNDS
-
-    model.train(True)
-
-    return loss.item(), avg_success.item(), avg_audibility.item()
-
-def main():
-    model = get_model()
-    model = model.to(device)
-    model.train(True)
-
-    trainloader = get_dataloader(16)
-    evalloader = get_dataloader(128)
+def get_model(n_symbols, samples_per_symbol, dec_layers_lens):
+    model = Model(n_symbols, samples_per_symbol, dec_layers_lens).to(device)
     optimizer = torch.optim.AdamW(model.parameters())
 
-    running_loss = 0.
-    last_loss = 1e9
-    last_time = time.time()
-    idx = 1
-    for i, data in enumerate(trainloader, 0):
-        labels = data
+    return model, optimizer
 
-        _, loss, audiblity = model(labels)
-        loss = audiblity if SIGNAL_AUDIBILITY and (audiblity >= MAX_AUDIBILITY) else loss
+def train(model, optimizer):
+    loss, success, audibility, frame_v = model.evaluate()
+    loss = audibility if SIGNAL_AUDIBILITY and (audibility >= MAX_AUDIBILITY) else loss
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        
-        running_loss += loss.item()
-        if (time.time() - last_time) > 10.:
-            last_time = time.time()
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
 
-            with torch.no_grad():
-                loss, success, audibility = evaluate(model, evalloader)
-
-            rep = f'running_loss={running_loss / idx}; loss={loss}; audibility={audibility}; success={success};'
-
-            if (loss < last_loss) and (audibility <= MAX_AUDIBILITY):
-                last_loss = loss
-                torch.save(model.state_dict(), f'models/model-{i + 1}.pt')
-                print(f'[SAVED {i + 1}] {rep}')
-
-            else:
-                print(f'[{i + 1}] {rep}')
-
-            running_loss = 0.
-            idx = 1
-
-        idx += 1
-
-        if i > EPOCHS:
-            break
-
-    print('Finished Training')
-
-if __name__ == '__main__':
-    main()
+    return model, loss, success, audibility, frame_v

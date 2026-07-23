@@ -6,12 +6,11 @@ import sys
 
 import torch
 
-device = torch.device('cuda')
-model = mnl.get_model().to(device)
+def main(model_f):
+    model = torch.load(model_f, weights_only=False).to(mnl.device)
 
-model_f = sys.argv[1]
+    loss, frame_v, audibility, score = model.evaluate()
+    print(f'loss={loss.item()} frame_v={frame_v} audibility={audibility.item()} score={score}')
 
-model.load_state_dict(torch.load(model_f))
-
-loss, success, audible = mnl.evaluate(model, mnl.get_dataloader(mnl.EVAL_BATCHES))
-print(model_f, loss, success, audible)
+if __name__ == '__main__':
+    main(sys.argv[1])

@@ -4,38 +4,27 @@ import mnl
 
 import sys
 
-import matplotlib
 import torch
 import torchaudio
 
-from matplotlib import pyplot as plt
+def main(model_f, signal_f, seq):
+    model = torch.load(model_f, weights_only=False).cpu()
 
-matplotlib.use('TkAgg')
+    signal, sample_rate = torchaudio.load(signal_f)
+    signal = signal.mean(0)
 
-device = torch.device('cuda')
+    seq = eval(sys.argv[3])
+    seq = torch.tensor(seq).cpu()
 
-model = mnl.get_model().to(device)
+    n_samples = seq.shape[0] * model.samples_per_symbol
 
-signal_f = sys.argv[1]
-signal, sample_rate = torchaudio.load(signal_f)
-signal = signal.mean(0)
-signal = torchaudio.functional.resample(signal, sample_rate, mnl.SAMPLE_RATE).to(device)
+    for idx in range(signal.shape[0] - n_samples + 1):
+        guess = signal[idx: idx + n_samples]
+        guess = guess.reshape((-1, model.samples_per_symbol))
+        guess = model.decoder(guess).argmax(-1)
 
-model_f = sys.argv[2]
-seq = torch.tensor(eval(sys.argv[3])).to(device)
+        if (guess == seq).all(dim=-1):
+            print(idx)
 
-model.load_state_dict(torch.load(model_f))
-
-for idx in range(mnl.SAMPLES_PER_SYMBOL):
-    n_symbols = int((signal.shape[0] - idx) / mnl.SAMPLES_PER_SYMBOL)
-    n_samples = n_symbols * mnl.SAMPLES_PER_SYMBOL
-
-    signal2 = signal[idx: idx + n_samples].reshape((-1, mnl.SAMPLES_PER_SYMBOL))
-    if not signal2.shape[0]:
-        continue
-
-    guess = model.decoder(signal2).argmax(-1)
-
-    if (guess.shape[0] >= seq.shape[0]) and (guess.unfold(0, seq.shape[0], 1) == seq).all(dim=-1).any():
-        plt.plot(guess.cpu())
-        plt.show()
+if __name__ == '__main__':
+    main(sys.argv[1], sys.argv[2], eval(sys.argv[3]))
